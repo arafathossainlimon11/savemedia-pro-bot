@@ -3,6 +3,7 @@ import os
 import re
 import time
 from aiohttp import web
+import requests
 import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 import yt_dlp
@@ -59,6 +60,40 @@ def handle_unlock(call):
   )
 
 
+# --- ওয়েব এক্সট্র্যাক্টর এপিআই (Engine 1) ---
+def download_via_api(url, output_path):
+  try:
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        ),
+    }
+    payload = {"url": url, "vQuality": "720"}
+
+    # পাবলিক ভিডিও এপিআই অ্যান্ডপয়েন্ট
+    response = requests.post(
+        "https://api.cobalt.tools/",
+        json=payload,
+        headers=headers,
+        timeout=15,
+    )
+    data = response.json()
+
+    if data.get("status") in ["tunnel", "redirect"]:
+      video_url = data.get("url")
+      v_resp = requests.get(video_url, stream=True, timeout=30)
+      with open(output_path, "wb") as f:
+        for chunk in v_resp.iter_content(chunk_size=1024 * 1024):
+          if chunk:
+            f.write(chunk)
+      return True
+  except Exception as e:
+    print(f"API Engine Error: {e}")
+  return False
+
+
 # --- ভিডিও লিংক প্রসেসিং ---
 @bot.message_handler(func=lambda message: True)
 def process_video_link(message):
@@ -99,84 +134,94 @@ def process_video_link(message):
     )
     return
 
-  # ২. ভিডিও ডাউনলোডিং নোটিফিকেশন
+  # ২. ডাউনলোডিং স্ট্যাটাস
   status_msg = bot.reply_to(
-      message, "🔄 **Processing your video... Please wait.**", parse_mode="Markdown"
+      message,
+      "🔄 **Extracting & Processing video... Please wait.**",
+      parse_mode="Markdown",
   )
 
-  # ৩. ভিডিও ডাউনলোড ও সেন্ড করা (অ্যান্টি-ব্লক সহ)
   try:
     if not os.path.exists("downloads"):
       os.makedirs("downloads")
 
-    ydl_opts = {
-        "format": "best[ext=mp4]/bestvideo+bestaudio/best",
-        "outtmpl": f"downloads/{user_id}_%(id)s.%(ext)s",
-        "quiet": True,
-        "no_warnings": True,
-        "nocheckcertificate": True,
-        "ignoreerrors": False,
-        "geo_bypass": True,
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-            ),
-            "Accept": (
-                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-            ),
-            "Accept-Language": "en-US,en;q=0.5",
-        },
-    }
+    output_file = f"downloads/{user_id}_{int(time.time())}.mp4"
+    download_success = False
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-      info = ydl.extract_info(video_url, download=True)
-      filename = ydl.prepare_filename(info)
+    # ৩. প্রথমে Web API Engine দিয়ে চেষ্টা
+    download_success = download_via_api(video_url, output_file)
 
-    # ইনলাইন বাটন ও ক্যাপশন এড
-    markup = InlineKeyboardMarkup()
-    btn_sponsor = InlineKeyboardButton(
-        "⚡ Bonus Offer / Sponsor", url=MONETAG_AD_LINK
-    )
-    markup.row(btn_sponsor)
+    # ৪. এপিআই কাজ না করলে Backup yt-dlp Engine (Android/iOS Client Bypass)
+    if not download_success:
+      ydl_opts = {
+          "format": "best[ext=mp4]/bestvideo+bestaudio/best",
+          "outtmpl": output_file,
+          "quiet": True,
+          "no_warnings": True,
+          "nocheckcertificate": True,
+          "geo_bypass": True,
+          "extractor_args": {
+              "youtube": {"player_client": ["android", "ios", "mweb"]}
+          },
+          "http_headers": {
+              "User-Agent": (
+                  "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X)"
+                  " AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6"
+                  " Mobile/15E148 Safari/604.1"
+              )
+          },
+      }
+      with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([video_url])
+        download_success = True
 
-    caption_text = (
-        f"📥 **Downloaded via @savemediapro_getbot**\n\n"
-        f"🔥 **Earn Money Online:** [Click Here]({MONETAG_AD_LINK})"
-    )
+    # ৫. ভিডিও টেলিগ্রামে পাঠানো
+    if download_success and os.path.exists(output_file):
+      markup = InlineKeyboardMarkup()
+      btn_sponsor = InlineKeyboardButton(
+          "⚡ Bonus Offer / Sponsor", url=MONETAG_AD_LINK
+      )
+      markup.row(btn_sponsor)
 
-    with open(filename, "rb") as video_file:
-      bot.send_video(
-          chat_id,
-          video_file,
-          caption=caption_text,
-          parse_mode="Markdown",
-          reply_markup=markup,
+      caption_text = (
+          f"📥 **Downloaded via @savemediapro_getbot**\n\n"
+          f"🔥 **Earn Money Online:** [Click Here]({MONETAG_AD_LINK})"
       )
 
-    # কাজ শেষ হলে মেসেজ ডিলেট ও ফাইল রিমুভ
-    bot.delete_message(chat_id, status_msg.message_id)
-    if os.path.exists(filename):
-      os.remove(filename)
+      with open(output_file, "rb") as video_file:
+        bot.send_video(
+            chat_id,
+            video_file,
+            caption=caption_text,
+            parse_mode="Markdown",
+            reply_markup=markup,
+        )
+
+      bot.delete_message(chat_id, status_msg.message_id)
+      if os.path.exists(output_file):
+        os.remove(output_file)
+    else:
+      raise Exception("Failed to fetch file.")
 
   except Exception as e:
     bot.edit_message_text(
-        "❌ **Failed to download video.** Please check the link and try again.",
+        "❌ **Failed to download video.** Please check the link or try another"
+        " video.",
         chat_id=chat_id,
         message_id=status_msg.message_id,
         parse_mode="Markdown",
     )
-    print(f"Error: {e}")
+    print(f"Download Error: {e}")
 
 
-# --- Web Server (Render Port Binding Active রাখার জন্য) ---
+# --- Web Server (Render Active রাখার জন্য) ---
 routes = web.RouteTableDef()
 
 
 @routes.get("/")
 async def home(request):
   return web.Response(
-      text="SaveMedia Pro Bot Active!", content_type="text/plain"
+      text="SaveMedia Pro Bot Engine Active!", content_type="text/plain"
   )
 
 
