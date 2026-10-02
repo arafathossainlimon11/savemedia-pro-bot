@@ -43,7 +43,6 @@ def send_welcome(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("unlock_"))
 def handle_unlock(call):
   user_id = call.from_user.id
-  # ইউজার বাটন চাপলে তার আগামী ২ ঘণ্টার জন্য ডাউনলোডার আনলক হয়ে যাবে
   user_last_ad_time[user_id] = time.time()
 
   bot.answer_callback_query(
@@ -105,16 +104,29 @@ def process_video_link(message):
       message, "🔄 **Processing your video... Please wait.**", parse_mode="Markdown"
   )
 
-  # ৩. ভিডিও ডাউনলোড ও সেন্ড করা
+  # ৩. ভিডিও ডাউনলোড ও সেন্ড করা (অ্যান্টি-ব্লক সহ)
   try:
     if not os.path.exists("downloads"):
       os.makedirs("downloads")
 
     ydl_opts = {
-        "format": "best",
+        "format": "best[ext=mp4]/bestvideo+bestaudio/best",
         "outtmpl": f"downloads/{user_id}_%(id)s.%(ext)s",
         "quiet": True,
         "no_warnings": True,
+        "nocheckcertificate": True,
+        "ignoreerrors": False,
+        "geo_bypass": True,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            ),
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            ),
+            "Accept-Language": "en-US,en;q=0.5",
+        },
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
