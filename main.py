@@ -54,98 +54,147 @@ def handle_unlock(call):
   )
 
 
-# --- ফুল ইউআরএল ট্রেসার (Short Links Resolver) ---
-def get_full_url(short_url):
-  session = requests.Session()
-  session.headers.update({
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-      )
-  })
+# --- ১. টিকটক প্রসেসর (TikWM POST Engine) ---
+def download_tiktok_stream(url, output_path):
   try:
-    response = session.get(short_url, allow_redirects=True, timeout=10)
-    return response.url
-  except Exception:
-    return short_url
-
-
-# --- ১. টিকটকের জন্য ডেডিকেটেড এক্সট্র্যাক্টর ---
-def download_tiktok_video(url, output_path):
-  try:
-    full_url = get_full_url(url)
-    api_endpoint = f"https://www.tikwm.com/api/?url={full_url}"
-    res = requests.get(api_endpoint, timeout=12).json()
-
-    if res.get("code") == 0:
-      video_url = res["data"].get("play") or res["data"].get("wmplay")
-      if video_url:
-        v_stream = requests.get(video_url, timeout=30)
-        with open(output_path, "wb") as f:
-          f.write(v_stream.content)
-        return True
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            " (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        )
+    }
+    # TikWM-এ POST রিকোয়েস্ট পাস করা
+    resp = requests.post(
+        "https://www.tikwm.com/api/",
+        data={"url": url, "hd": 1},
+        headers=headers,
+        timeout=15,
+    )
+    if resp.status_code == 200:
+      data = resp.json()
+      if data.get("code") == 0:
+        v_url = (
+            data["data"].get("hdplay")
+            or data["data"].get("play")
+            or data["data"].get("wmplay")
+        )
+        if v_url:
+          if not v_url.startswith("http"):
+            v_url = "https://www.tikwm.com" + v_url
+          v_data = requests.get(v_url, headers=headers, timeout=30).content
+          with open(output_path, "wb") as f:
+            f.write(v_data)
+          if (
+              os.path.exists(output_path)
+              and os.path.getsize(output_path) > 50000
+          ):
+            return True
   except Exception as e:
-    print(f"TikTok Download Exception: {e}")
+    print(f"TikTok Engine Error: {e}")
   return False
 
 
-# --- ২. গ্লোবাল কোবাল্ট এপিআই (YouTube Shorts, FB & Insta) ---
-def download_via_cobalt_engine(url, output_path):
-  clean_url = get_full_url(url)
-
-  # ইউটিউব শর্টসকে স্ট্যান্ডার্ড ওয়াচ ইউআরএলে কনভার্ট করা
+# --- ২. কোবাল্ট মাল্টি-নোড এপিআই (YouTube, FB, Insta Engine) ---
+def download_cobalt_stream(url, output_path):
+  # শর্টস বা শেয়ার লিংক ক্লিন করা
+  clean_url = url
   yt_match = re.search(
-      r"(?:youtube\.com\/shorts\/|youtu\.be\/|v=)([a-zA-Z0-9_-]{11})", clean_url
+      r"(?:youtube\.com\/shorts\/|youtu\.be\/|v=)([a-zA-Z0-9_-]{11})", url
   )
   if yt_match:
-    video_id = yt_match.group(1)
-    clean_url = f"https://www.youtube.com/watch?v={video_id}"
-
-  cobalt_nodes = [
-      "https://api.cobalt.tools/",
-      "https://cobalt-api.kwippy.com/",
-      "https://cobalt.qtf.rs/",
-      "https://co.wuk.sh/",
-  ]
+    clean_url = f"https://www.youtube.com/watch?v={yt_match.group(1)}"
 
   headers = {
       "Accept": "application/json",
       "Content-Type": "application/json",
+      "Origin": "https://cobalt.tools",
+      "Referer": "https://cobalt.tools/",
       "User-Agent": (
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          " (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
       ),
   }
 
-  for node in cobalt_nodes:
-    try:
-      payload = {"url": clean_url, "videoQuality": "720"}
-      resp = requests.post(node, json=payload, headers=headers, timeout=10)
-      if resp.status_code == 200:
-        data = resp.json()
-        stream_url = None
-        if data.get("status") in ["tunnel", "redirect"]:
-          stream_url = data.get("url")
-        elif data.get("status") == "picker":
-          picker = data.get("picker", [])
-          if picker:
-            stream_url = picker[0].get("url")
+  nodes = [
+      "https://api.cobalt.tools/",
+      "https://co.wuk.sh/api/json",
+      "https://cobalt-api.kwippy.com/",
+      "https://api.cobalt.red/",
+  ]
 
-        if stream_url:
-          v_resp = requests.get(stream_url, stream=True, timeout=35)
-          if v_resp.status_code == 200:
+  payload = {
+      "url": clean_url,
+      "videoQuality": "720",
+      "youtubeVideoCodec": "h264",
+      "isAudioOnly": False,
+  }
+
+  for node in nodes:
+    try:
+      r = requests.post(node, json=payload, headers=headers, timeout=12)
+      if r.status_code == 200:
+        res_data = r.json()
+        s_url = None
+        if res_data.get("status") in ["tunnel", "redirect"]:
+          s_url = res_data.get("url")
+        elif res_data.get("status") == "picker":
+          picker = res_data.get("picker", [])
+          if picker:
+            s_url = picker[0].get("url")
+
+        if s_url:
+          v_res = requests.get(s_url, stream=True, timeout=35)
+          if v_res.status_code == 200:
             with open(output_path, "wb") as f:
-              for chunk in v_resp.iter_content(chunk_size=1024 * 1024):
+              for chunk in v_res.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                   f.write(chunk)
             if (
                 os.path.exists(output_path)
-                and os.path.getsize(output_path) > 1000
+                and os.path.getsize(output_path) > 50000
             ):
               return True
     except Exception as e:
-      print(f"Node fail ({node}): {e}")
+      print(f"Cobalt Node Fail ({node}): {e}")
       continue
 
+  return False
+
+
+# --- ৩. ইউটিউব ইনভিডিয়াস এপিআই (Invidious Engine) ---
+def download_invidious_stream(url, output_path):
+  yt_match = re.search(
+      r"(?:youtube\.com\/shorts\/|youtu\.be\/|v=)([a-zA-Z0-9_-]{11})", url
+  )
+  if not yt_match:
+    return False
+  v_id = yt_match.group(1)
+
+  inv_nodes = [
+      f"https://inv.tux.pizza/api/v1/videos/{v_id}",
+      f"https://invidious.nerdvpn.de/api/v1/videos/{v_id}",
+      f"https://vid.puffyan.us/api/v1/videos/{v_id}",
+  ]
+
+  for node in inv_nodes:
+    try:
+      resp = requests.get(node, timeout=10)
+      if resp.status_code == 200:
+        data = resp.json()
+        formats = data.get("formatStreams", [])
+        if formats:
+          stream_url = formats[0].get("url")
+          if stream_url:
+            v_data = requests.get(stream_url, timeout=30).content
+            with open(output_path, "wb") as f:
+              f.write(v_data)
+            if (
+                os.path.exists(output_path)
+                and os.path.getsize(output_path) > 50000
+            ):
+              return True
+    except Exception:
+      continue
   return False
 
 
@@ -190,7 +239,7 @@ def process_video_link(message):
 
   status_msg = bot.reply_to(
       message,
-      "🔄 **Extracting HD Video Stream... Please wait.**",
+      "🔄 **Downloading HD Video Stream... Please wait.**",
       parse_mode="Markdown",
   )
 
@@ -201,17 +250,22 @@ def process_video_link(message):
     output_file = f"downloads/{user_id}_{int(time.time())}.mp4"
     download_success = False
 
-    # ২. টিকটক প্রসেসিং
+    # টিকটক
     if "tiktok.com" in raw_url:
-      download_success = download_tiktok_video(raw_url, output_file)
+      download_success = download_tiktok_stream(raw_url, output_file)
 
-    # ৩. টিকটক ছাড়া অন্যান্য সোশ্যাল মিডিয়া (YouTube, Facebook, Insta)
+    # ইউটিউব, ফেসবুক, ইনস্টাগ্রাম
     if not download_success:
-      download_success = download_via_cobalt_engine(raw_url, output_file)
+      download_success = download_cobalt_stream(raw_url, output_file)
 
-    # ৪. ব্যাকআপ ইঞ্জিনে চূড়ান্ত চেষ্টা (yt-dlp Engine)
+    # ইউটিউব ইনভিডিয়াস ব্যাকআপ
+    if not download_success and (
+        "youtube.com" in raw_url or "youtu.be" in raw_url
+    ):
+      download_success = download_invidious_stream(raw_url, output_file)
+
+    # ব্যাকআপ yt-dlp
     if not download_success:
-      real_url = get_full_url(raw_url)
       ydl_opts = {
           "format": "best[ext=mp4]/best",
           "outtmpl": output_file,
@@ -222,20 +276,19 @@ def process_video_link(message):
           "extractor_args": {
               "youtube": {
                   "player_client": [
-                      "android",
                       "ios",
+                      "android",
                       "mweb",
-                      "tv_embedded",
                   ]
               }
           },
       }
       with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([real_url])
-        if os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
+        ydl.download([raw_url])
+        if os.path.exists(output_file) and os.path.getsize(output_file) > 50000:
           download_success = True
 
-    # ৫. ভিডিও সেন্ড করা
+    # টেলিগ্রামে সেন্ড করা
     if download_success and os.path.exists(output_file):
       markup = InlineKeyboardMarkup()
       btn_sponsor = InlineKeyboardButton(
@@ -261,12 +314,11 @@ def process_video_link(message):
       if os.path.exists(output_file):
         os.remove(output_file)
     else:
-      raise Exception("Video extraction stream failed.")
+      raise Exception("All extraction engines failed.")
 
   except Exception as e:
     bot.edit_message_text(
-        "❌ **Failed to download video.** Please check the link or try another"
-        " video.",
+        "❌ **Failed to download video.** Please check the link and try again.",
         chat_id=chat_id,
         message_id=status_msg.message_id,
         parse_mode="Markdown",
@@ -274,7 +326,7 @@ def process_video_link(message):
     print(f"Error Log: {e}")
 
 
-# --- Web Server (Render Active রাখার জন্য) ---
+# --- Web Server ---
 routes = web.RouteTableDef()
 
 
