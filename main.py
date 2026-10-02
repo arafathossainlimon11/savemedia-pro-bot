@@ -21,14 +21,12 @@ bot = telebot.TeleBot(BOT_TOKEN)
 user_last_ad_time = {}
 
 
-# --- টাইমার অ্যাড অপশন চেক করার ফাংশন ---
 def is_ad_required(user_id):
   last_time = user_last_ad_time.get(user_id, 0)
   current_time = time.time()
   return (current_time - last_time) >= COOLDOWN_SECONDS
 
 
-# --- স্টার্ট ও মেনু ---
 @bot.message_handler(commands=["start", "help"])
 def send_welcome(message):
   welcome_text = (
@@ -40,7 +38,6 @@ def send_welcome(message):
   bot.reply_to(message, welcome_text, parse_mode="Markdown")
 
 
-# --- আনলক অ্যাড বাটন হ্যান্ডলার ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("unlock_"))
 def handle_unlock(call):
   user_id = call.from_user.id
@@ -60,41 +57,39 @@ def handle_unlock(call):
   )
 
 
-# --- ওয়েব এক্সট্র্যাক্টর এপিআই (Engine 1) ---
-def download_via_api(url, output_path):
+# --- শর্ট লিংক বা শেয়ার লিংক অরিজিনাল লিংকে রূপান্তর করার ফাংশন ---
+def unshorten_url(url):
   try:
     headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        ),
+            " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
     }
-    payload = {"url": url, "vQuality": "720"}
-
-    # পাবলিক ভিডিও এপিআই অ্যান্ডপয়েন্ট
-    response = requests.post(
-        "https://api.cobalt.tools/",
-        json=payload,
-        headers=headers,
-        timeout=15,
+    res = requests.head(
+        url, allow_redirects=True, headers=headers, timeout=10
     )
-    data = response.json()
+    return res.url
+  except Exception:
+    return url
 
-    if data.get("status") in ["tunnel", "redirect"]:
-      video_url = data.get("url")
-      v_resp = requests.get(video_url, stream=True, timeout=30)
+
+# --- টিকটকের জন্য ডেডিকেটেড এপিআই ---
+def download_tiktok(url, output_path):
+  try:
+    api_url = f"https://www.tikwm.com/api/?url={url}"
+    res = requests.get(api_url, timeout=10).json()
+    if res.get("code") == 0:
+      video_url = res["data"]["play"]
+      v_data = requests.get(video_url, timeout=30).content
       with open(output_path, "wb") as f:
-        for chunk in v_resp.iter_content(chunk_size=1024 * 1024):
-          if chunk:
-            f.write(chunk)
+        f.write(v_data)
       return True
   except Exception as e:
-    print(f"API Engine Error: {e}")
+    print(f"TikTok API Error: {e}")
   return False
 
 
-# --- ভিডিও লিংক প্রসেসিং ---
 @bot.message_handler(func=lambda message: True)
 def process_video_link(message):
   user_id = message.from_user.id
@@ -111,7 +106,7 @@ def process_video_link(message):
     )
     return
 
-  video_url = urls[0]
+  raw_url = urls[0]
 
   # ১. ২ ঘণ্টার টাইমার অ্যাড চেক
   if is_ad_required(user_id):
@@ -134,11 +129,8 @@ def process_video_link(message):
     )
     return
 
-  # ২. ডাউনলোডিং স্ট্যাটাস
   status_msg = bot.reply_to(
-      message,
-      "🔄 **Extracting & Processing video... Please wait.**",
-      parse_mode="Markdown",
+      message, "🔄 **Processing video... Please wait.**", parse_mode="Markdown"
   )
 
   try:
@@ -148,34 +140,39 @@ def process_video_link(message):
     output_file = f"downloads/{user_id}_{int(time.time())}.mp4"
     download_success = False
 
-    # ৩. প্রথমে Web API Engine দিয়ে চেষ্টা
-    download_success = download_via_api(video_url, output_file)
+    # ২. শর্ট লিংক আনরোল করা (বিশেষ করে ফেসবুক শেয়ার লিংকের জন্য)
+    real_url = unshorten_url(raw_url)
 
-    # ৪. এপিআই কাজ না করলে Backup yt-dlp Engine (Android/iOS Client Bypass)
+    # ৩. টিকটক আলাদা এপিআই দিয়ে চেক
+    if "tiktok.com" in real_url:
+      download_success = download_tiktok(real_url, output_file)
+
+    # ৪. ইউটিউব, ফেসবুক ও ইনস্টাগ্রামের জন্য অ্যাডভান্সড ডাউনলোডার
     if not download_success:
       ydl_opts = {
-          "format": "best[ext=mp4]/bestvideo+bestaudio/best",
+          "format": "best[ext=mp4]/best",
           "outtmpl": output_file,
           "quiet": True,
           "no_warnings": True,
           "nocheckcertificate": True,
           "geo_bypass": True,
           "extractor_args": {
-              "youtube": {"player_client": ["android", "ios", "mweb"]}
+              "youtube": {"player_client": ["ios", "mweb", "android"]}
           },
           "http_headers": {
               "User-Agent": (
                   "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X)"
                   " AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6"
                   " Mobile/15E148 Safari/604.1"
-              )
+              ),
+              "Accept-Language": "en-US,en;q=0.9",
           },
       }
       with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([video_url])
+        ydl.download([real_url])
         download_success = True
 
-    # ৫. ভিডিও টেলিগ্রামে পাঠানো
+    # ৫. ভিডিও সেন্ড করা
     if download_success and os.path.exists(output_file):
       markup = InlineKeyboardMarkup()
       btn_sponsor = InlineKeyboardButton(
@@ -201,28 +198,26 @@ def process_video_link(message):
       if os.path.exists(output_file):
         os.remove(output_file)
     else:
-      raise Exception("Failed to fetch file.")
+      raise Exception("File extraction failed")
 
   except Exception as e:
     bot.edit_message_text(
-        "❌ **Failed to download video.** Please check the link or try another"
-        " video.",
+        "❌ **Failed to download video.** Please ensure the video is public and"
+        " try again.",
         chat_id=chat_id,
         message_id=status_msg.message_id,
         parse_mode="Markdown",
     )
-    print(f"Download Error: {e}")
+    print(f"Error: {e}")
 
 
-# --- Web Server (Render Active রাখার জন্য) ---
+# --- Web Server ---
 routes = web.RouteTableDef()
 
 
 @routes.get("/")
 async def home(request):
-  return web.Response(
-      text="SaveMedia Pro Bot Engine Active!", content_type="text/plain"
-  )
+  return web.Response(text="SaveMedia Pro Bot Active!", content_type="text/plain")
 
 
 def run_bot():
