@@ -16,15 +16,12 @@ MONETAG_AD_LINK = "https://omg10.com/4/11200499"
 COOLDOWN_SECONDS = 7200
 
 bot = telebot.TeleBot(BOT_TOKEN)
-
-# ইউজারের লাস্ট অ্যাড দেখার সময় ট্র্যাক করার জন্য ডাটাবেজ
 user_last_ad_time = {}
 
 
 def is_ad_required(user_id):
   last_time = user_last_ad_time.get(user_id, 0)
-  current_time = time.time()
-  return (current_time - last_time) >= COOLDOWN_SECONDS
+  return (time.time() - last_time) >= COOLDOWN_SECONDS
 
 
 @bot.message_handler(commands=["start", "help"])
@@ -57,120 +54,98 @@ def handle_unlock(call):
   )
 
 
-# --- শর্ট লিংক অরিজিনাল লিংকে রূপান্তর করার ফাংশন ---
-def unshorten_url(url):
+# --- ফুল ইউআরএল ট্রেসার (Short Links Resolver) ---
+def get_full_url(short_url):
+  session = requests.Session()
+  session.headers.update({
+      "User-Agent": (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+      )
+  })
   try:
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        )
-    }
-    res = requests.head(
-        url, allow_redirects=True, headers=headers, timeout=10
-    )
-    return res.url
+    response = session.get(short_url, allow_redirects=True, timeout=10)
+    return response.url
   except Exception:
-    return url
+    return short_url
 
 
-# --- ১. টিকটক এপিআই ---
-def download_tiktok(url, output_path):
+# --- ১. টিকটকের জন্য ডেডিকেটেড এক্সট্র্যাক্টর ---
+def download_tiktok_video(url, output_path):
   try:
-    api_url = f"https://www.tikwm.com/api/?url={url}"
-    res = requests.get(api_url, timeout=10).json()
+    full_url = get_full_url(url)
+    api_endpoint = f"https://www.tikwm.com/api/?url={full_url}"
+    res = requests.get(api_endpoint, timeout=12).json()
+
     if res.get("code") == 0:
-      video_url = res["data"]["play"]
-      v_data = requests.get(video_url, timeout=30).content
-      with open(output_path, "wb") as f:
-        f.write(v_data)
-      return True
+      video_url = res["data"].get("play") or res["data"].get("wmplay")
+      if video_url:
+        v_stream = requests.get(video_url, timeout=30)
+        with open(output_path, "wb") as f:
+          f.write(v_stream.content)
+        return True
   except Exception as e:
-    print(f"TikTok API Error: {e}")
+    print(f"TikTok Download Exception: {e}")
   return False
 
 
-# --- ২. ইউটিউব শর্টস এপিআই (IP Block Bypass) ---
-def download_youtube_api(url, output_path):
-  try:
-    match = re.search(r"(?:v=|\/shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})", url)
-    if not match:
-      return False
-    video_id = match.group(1)
+# --- ২. গ্লোবাল কোবাল্ট এপিআই (YouTube Shorts, FB & Insta) ---
+def download_via_cobalt_engine(url, output_path):
+  clean_url = get_full_url(url)
 
-    invidious_nodes = [
-        f"https://inv.tux.pizza/api/v1/videos/{video_id}",
-        f"https://invidious.nerdvpn.de/api/v1/videos/{video_id}",
-        f"https://vid.puffyan.us/api/v1/videos/{video_id}",
-    ]
+  # ইউটিউব শর্টসকে স্ট্যান্ডার্ড ওয়াচ ইউআরএলে কনভার্ট করা
+  yt_match = re.search(
+      r"(?:youtube\.com\/shorts\/|youtu\.be\/|v=)([a-zA-Z0-9_-]{11})", clean_url
+  )
+  if yt_match:
+    video_id = yt_match.group(1)
+    clean_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    for node in invidious_nodes:
-      try:
-        res = requests.get(node, timeout=8)
-        if res.status_code == 200:
-          data = res.json()
-          streams = data.get("formatStreams", [])
-          if streams:
-            stream_url = streams[0].get("url")
-            if stream_url:
-              v_resp = requests.get(stream_url, stream=True, timeout=30)
-              if v_resp.status_code == 200:
-                with open(output_path, "wb") as f:
-                  for chunk in v_resp.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                      f.write(chunk)
-                if (
-                    os.path.exists(output_path)
-                    and os.path.getsize(output_path) > 1000
-                ):
-                  return True
-      except Exception:
-        continue
-  except Exception as e:
-    print(f"YouTube Invidious API Error: {e}")
-  return False
-
-
-# --- ৩. কোবাল্ট মাল্টি-ইনস্ট্যান্স এপিআই (Facebook/Insta/YouTube) ---
-def download_cobalt(url, output_path):
-  instances = [
+  cobalt_nodes = [
       "https://api.cobalt.tools/",
       "https://cobalt-api.kwippy.com/",
       "https://cobalt.qtf.rs/",
+      "https://co.wuk.sh/",
   ]
-  for inst in instances:
-    try:
-      headers = {
-          "Accept": "application/json",
-          "Content-Type": "application/json",
-      }
-      res = requests.post(inst, json={"url": url}, headers=headers, timeout=10)
-      data = res.json()
-      stream_url = None
 
-      if isinstance(data, dict):
+  headers = {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      ),
+  }
+
+  for node in cobalt_nodes:
+    try:
+      payload = {"url": clean_url, "videoQuality": "720"}
+      resp = requests.post(node, json=payload, headers=headers, timeout=10)
+      if resp.status_code == 200:
+        data = resp.json()
+        stream_url = None
         if data.get("status") in ["tunnel", "redirect"]:
           stream_url = data.get("url")
         elif data.get("status") == "picker":
           picker = data.get("picker", [])
-          if picker and isinstance(picker, list):
+          if picker:
             stream_url = picker[0].get("url")
 
-      if stream_url:
-        v_resp = requests.get(stream_url, stream=True, timeout=30)
-        if v_resp.status_code == 200:
-          with open(output_path, "wb") as f:
-            for chunk in v_resp.iter_content(chunk_size=1024 * 1024):
-              if chunk:
-                f.write(chunk)
-          if (
-              os.path.exists(output_path)
-              and os.path.getsize(output_path) > 1000
-          ):
-            return True
+        if stream_url:
+          v_resp = requests.get(stream_url, stream=True, timeout=35)
+          if v_resp.status_code == 200:
+            with open(output_path, "wb") as f:
+              for chunk in v_resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                  f.write(chunk)
+            if (
+                os.path.exists(output_path)
+                and os.path.getsize(output_path) > 1000
+            ):
+              return True
     except Exception as e:
-      print(f"Cobalt Instance Error ({inst}): {e}")
+      print(f"Node fail ({node}): {e}")
       continue
+
   return False
 
 
@@ -215,7 +190,7 @@ def process_video_link(message):
 
   status_msg = bot.reply_to(
       message,
-      "🔄 **Extracting video stream... Please wait.**",
+      "🔄 **Extracting HD Video Stream... Please wait.**",
       parse_mode="Markdown",
   )
 
@@ -226,24 +201,17 @@ def process_video_link(message):
     output_file = f"downloads/{user_id}_{int(time.time())}.mp4"
     download_success = False
 
-    real_url = unshorten_url(raw_url)
+    # ২. টিকটক প্রসেসিং
+    if "tiktok.com" in raw_url:
+      download_success = download_tiktok_video(raw_url, output_file)
 
-    # ১. টিকটকের জন্য
-    if "tiktok.com" in real_url:
-      download_success = download_tiktok(real_url, output_file)
-
-    # ২. ইউটিউবের জন্য
-    if not download_success and (
-        "youtube.com" in real_url or "youtu.be" in real_url
-    ):
-      download_success = download_youtube_api(real_url, output_file)
-
-    # ৩. গ্লোবাল কোবাল্ট এপিআই (সব সোশ্যাল মিডিয়ার জন্য)
+    # ৩. টিকটক ছাড়া অন্যান্য সোশ্যাল মিডিয়া (YouTube, Facebook, Insta)
     if not download_success:
-      download_success = download_cobalt(real_url, output_file)
+      download_success = download_via_cobalt_engine(raw_url, output_file)
 
-    # ৪. ব্যাকআপ ডাউনলোডার (yt-dlp Engine)
+    # ৪. ব্যাকআপ ইঞ্জিনে চূড়ান্ত চেষ্টা (yt-dlp Engine)
     if not download_success:
+      real_url = get_full_url(raw_url)
       ydl_opts = {
           "format": "best[ext=mp4]/best",
           "outtmpl": output_file,
@@ -254,24 +222,17 @@ def process_video_link(message):
           "extractor_args": {
               "youtube": {
                   "player_client": [
-                      "tv_embedded",
-                      "web_creator",
-                      "mweb",
                       "android",
+                      "ios",
+                      "mweb",
+                      "tv_embedded",
                   ]
               }
-          },
-          "http_headers": {
-              "User-Agent": (
-                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                  " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-              ),
-              "Accept-Language": "en-US,en;q=0.9",
           },
       }
       with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([real_url])
-        if os.path.exists(output_file):
+        if os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
           download_success = True
 
     # ৫. ভিডিও সেন্ড করা
@@ -300,7 +261,7 @@ def process_video_link(message):
       if os.path.exists(output_file):
         os.remove(output_file)
     else:
-      raise Exception("All extraction layers failed.")
+      raise Exception("Video extraction stream failed.")
 
   except Exception as e:
     bot.edit_message_text(
@@ -310,10 +271,10 @@ def process_video_link(message):
         message_id=status_msg.message_id,
         parse_mode="Markdown",
     )
-    print(f"Error: {e}")
+    print(f"Error Log: {e}")
 
 
-# --- Web Server (Render Port Binding Active রাখার জন্য) ---
+# --- Web Server (Render Active রাখার জন্য) ---
 routes = web.RouteTableDef()
 
 
